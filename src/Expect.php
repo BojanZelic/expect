@@ -7,12 +7,12 @@ use Psr\Log\NullLogger;
 use Yuloh\Expect\Exceptions\ProcessTimeoutException;
 use Yuloh\Expect\Exceptions\UnexpectedEOFException;
 use Yuloh\Expect\Exceptions\ProcessTerminatedException;
+use Yuloh\Expect\Steps\ExpectStep;
+use Yuloh\Expect\Steps\SendStep;
+use Yuloh\Expect\Steps\WhenStep;
 
 class Expect
 {
-    const EXPECT = 0;
-    const SEND   = 1;
-
     /**
      * The default timeout for expectations.
      */
@@ -43,6 +43,13 @@ class Expect
      */
     private $logger;
 
+        /**
+      * @var WhenStep[]
+      */
+    private $optional_steps = [];
+    
+    private $input_reader;
+
     /**
      * @param string $cmd
      * @param string $cwd
@@ -53,6 +60,7 @@ class Expect
         $this->cmd    = $cmd;
         $this->cwd    = $cwd;
         $this->logger = $logger ?: new NullLogger();
+        $this->input_reader = new InputReader($cmd, $cwd);
     }
 
     /**
@@ -82,7 +90,7 @@ class Expect
      */
     public function expect($output, $timeout = self::DEFAULT_TIMEOUT)
     {
-        $this->steps[] = [self::EXPECT, $output, $timeout];
+        $this->steps[] = new ExpectStep($output, $timeout);
 
         return $this;
     }
@@ -100,7 +108,14 @@ class Expect
             $input = $input . PHP_EOL;
         }
 
-        $this->steps[] = [self::SEND, $input];
+        $this->steps[] = new SendStep($input);
+
+        return $this;
+    }
+
+    public function when($output, $send = '', $callback = null)
+    {
+        $this->optional_steps[] = new WhenStep($output, $send, $callback);
 
         return $this;
     }
@@ -119,55 +134,41 @@ class Expect
      */
     public function run()
     {
-        $this->createProcess();
+        $this->input_reader->createProcess();
+        
+        foreach ($this->optional_steps as $optional_step) {
+            $this->input_reader->addListener($optional_step);
+        }
 
         foreach ($this->steps as $step) {
-            if ($step[0] === self::EXPECT) {
-                $expectation = $step[1];
-                $timeout     = $step[2];
+            if ($step instanceof ExpectStep) {
+                $expectation = $step->getOutput();
+                $timeout     = $step->getTimeout();
                 $this->waitForExpectedResponse($expectation, $timeout);
-            } else {
-                $input = $step[1];
+            } elseif ($step instanceof SendStep) {
+                $input = $step->getOutput();
                 $this->sendInput($input);
             }
         }
 
-        $this->closeProcess();
+        $this->input_reader->closeProcess();
     }
-
-    /**
-     * Create the process.
-     *
-     * @return null
-     * @throws \RuntimeException If the process can not be created.
-     */
-    private function createProcess()
+    
+    private function runOptionalSteps($response)
     {
-        $descriptorSpec = [
-            ['pipe', 'r'], // stdin
-            ['pipe', 'w'], // stdout
-            ['pipe', 'r']  // stderr
-        ];
+        foreach ($this->optional_steps as $key => $step) {
+            if (fnmatch($step->getOutput(), $response)) {
+                $this->sendInput($step->getSend());
+                $function = $step->getCallback();
+                if (is_callable($function)) {
+                    $function($response);
+                }
 
-        $this->process = proc_open($this->cmd, $descriptorSpec, $this->pipes, $this->cwd);
-
-        if (!is_resource($this->process)) {
-            throw new \RuntimeException('Could not create the process.');
+                unset($this->optional_steps[$key]);
+            }
         }
     }
-
-    /**
-     * Close the process.
-     *
-     * @return null
-     */
-    private function closeProcess()
-    {
-        fclose($this->pipes[0]);
-        fclose($this->pipes[1]);
-        fclose($this->pipes[2]);
-        proc_close($this->process);
-    }
+    
 
     /**
      * Wait for the given response to show on stdout.
@@ -185,23 +186,21 @@ class Expect
         $lastLoggedResponse = null;
         $buffer             = '';
         $start              = time();
-        stream_set_blocking($this->pipes[1], false);
 
         while (true) {
             if (time() - $start >= $timeout) {
                 throw new ProcessTimeoutException();
             }
 
-            if (feof($this->pipes[1])) {
+            if (feof($this->input_reader->getPipe())) {
                 throw new UnexpectedEOFException();
             }
 
-            if (!$this->isRunning()) {
+            if (!$this->input_reader->isRunning()) {
                 throw new ProcessTerminatedException();
             }
 
-            $buffer .= fread($this->pipes[1], 4096);
-            $response = static::trimAnswer($buffer);
+            $response = $this->input_reader->read($buffer);
 
             if ($response !== '' && $response !== $lastLoggedResponse) {
                 $lastLoggedResponse = $response;
@@ -211,6 +210,8 @@ class Expect
             if (fnmatch($expectation, $response)) {
                 return;
             }
+
+              $this->runOptionalSteps($response);
         }
     }
 
@@ -224,33 +225,6 @@ class Expect
     {
         $this->logger->info("Sending '{$input}'");
 
-        fwrite($this->pipes[0], $input);
-    }
-
-    /**
-     * Returns a string with any newlines trimmed.
-     *
-     * @param  string $str
-     * @return string
-     */
-    private static function trimAnswer($str)
-    {
-        return preg_replace('{\r?\n$}D', '', $str);
-    }
-
-    /**
-     * Determine if the process is running.
-     *
-     * @return boolean
-     */
-    private function isRunning()
-    {
-        if (!is_resource($this->process)) {
-            return false;
-        }
-
-        $status = proc_get_status($this->process);
-
-        return $status['running'];
+        $this->input_reader->sendInput($input);
     }
 }

@@ -42,4 +42,57 @@ class ExpectTest extends \PHPUnit_Framework_TestCase
             ->expect('hola')
             ->run();
     }
+
+	public function testMultipleOutputsSuccessCallBackFunction()
+	{
+		$this->setExpectedException(\Exception::class);
+
+		Expect::spawn('cat')
+		      ->send('test')
+		      ->when('hi', 'test')
+		      ->when('test', 'blah', function ($response) {
+			      throw new \Exception('test');
+		      })
+		      ->expect('blah', 1)
+		      ->send('hola')
+		      ->expect('hola')
+		      ->run();
+	}
+	
+		public function testMultipleOutputsSuccessOrder1()
+		{
+			Expect::spawn('cat')
+			      ->send('test')
+			      ->when('hi', 'test')
+			      ->when('test', 'blah')
+			      ->expect('blah', 1)
+			      ->send('hola')
+			      ->expect('hola')
+			      ->run();
+		}
+
+		public function testMultipleOutputsSuccess()
+		{
+			Expect::spawn('cat')
+			      ->send('hi')
+			      ->when('hi', 'test')
+						->when('test', 'blah')
+						->expect('blah', 1)
+			      ->send('hola')
+			      ->expect('hola')
+			      ->run();
+		}
+
+    public function testMultipleOutputsFail()
+    {
+	    $this->setExpectedException(Exceptions\ProcessTimeoutException::class);
+
+	    Expect::spawn('cat')
+              ->send('hi')
+              ->when('hi', 'test')
+	            ->expect('blah', 1)
+              ->send('hola')
+              ->expect('hola')
+              ->run();
+    }
 }
